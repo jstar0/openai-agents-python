@@ -2803,6 +2803,23 @@ async def test_rewind_debug_logging_respects_model_and_tool_policies(
 
 
 @pytest.mark.asyncio
+async def test_rewind_failure_uses_placeholder_free_shared_logger_message() -> None:
+    class FailingTailSession(SimpleListSession):
+        async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+            raise RuntimeError("tail failure")
+
+    item = cast(TResponseInputItem, {"type": "message", "role": "user", "content": "hi"})
+    session = FailingTailSession(history=[item])
+
+    with patch(
+        "agents.run_internal.session_persistence.log_model_and_tool_action_warning"
+    ) as mock_warning:
+        await rewind_session_items(session, [item])
+
+    assert mock_warning.call_args.args[1] == "Failed to rewind session item"
+
+
+@pytest.mark.asyncio
 async def test_rewind_skips_mismatched_tail_suffix() -> None:
     target = cast(TResponseInputItem, {"type": "message", "role": "user", "content": "target"})
     unrelated = cast(

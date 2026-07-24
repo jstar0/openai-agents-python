@@ -206,7 +206,12 @@ class CleanupAwareServer(MCPServer):
             "streamable-http: https://example.test/mcp#secret",
             "streamable-http: https://example.test/mcp",
         ),
+        (
+            "streamable_http: https://user:password@[invalid/mcp?token=secret",
+            "streamable_http: <invalid-url>",
+        ),
         ("https://user:password@example.test/mcp?token=secret", "https://example.test/mcp"),
+        ("https://user:password@[invalid/mcp?token=secret", "<invalid-url>"),
         ("stdio: python server.py?token=secret", "stdio: python server.py?token=secret"),
     ],
 )

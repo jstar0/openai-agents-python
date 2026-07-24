@@ -22,6 +22,8 @@ def get_mcp_server_log_name(name: str) -> str:
     try:
         parsed = urlsplit(candidate)
     except ValueError:
+        if prefix or candidate.lower().startswith(("http://", "https://")):
+            return f"{prefix}<invalid-url>"
         return name
 
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:

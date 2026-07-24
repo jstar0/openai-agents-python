@@ -560,7 +560,7 @@ async def rewind_session_items(
         mismatch_warning=(
             "Skipping session rewind because the current tail does not match the retry-owned suffix"
         ),
-        pop_failure_warning="Failed to rewind session item: %s",
+        pop_failure_warning="Failed to rewind session item",
     )
     if not rewound:
         return
@@ -617,7 +617,7 @@ async def rewind_session_items(
             "Skipping stray session cleanup because the current tail no longer matches "
             "retry-owned conversation items"
         ),
-        pop_failure_warning="Failed to strip stray session item: %s",
+        pop_failure_warning="Failed to strip stray session item",
     )
 
 

@@ -38,6 +38,7 @@ KNOWN_HELPERS = {
     "agents.logger.log_tool_action_warning": "tool",
     "agents.run_internal.tool_execution.log_tool_action_error": "tool",
 }
+SENSITIVE_HELPER_METHODS = {name.rsplit(".", 1)[-1] for name in KNOWN_HELPERS}
 RAW_MODULE_METHODS = {
     "pprint": {"pprint"},
     "traceback": {"print_exc", "print_exception"},
@@ -144,42 +145,125 @@ def target_keys(node: ast.AST) -> list[str]:
     return []
 
 
-def iter_assignments(tree: ast.AST) -> Iterable[tuple[list[str], ast.AST]]:
+def iter_assignments(tree: ast.AST) -> Iterable[tuple[ast.AST, list[str], ast.AST]]:
     for node in ast.walk(tree):
         if isinstance(node, ast.Assign):
             for target in node.targets:
-                yield target_keys(target), node.value
+                yield node, target_keys(target), node.value
         elif isinstance(node, ast.AnnAssign) and node.value is not None:
-            yield target_keys(node.target), node.value
+            yield node, target_keys(node.target), node.value
         elif isinstance(node, ast.NamedExpr):
-            yield target_keys(node.target), node.value
+            yield node, target_keys(node.target), node.value
+
+
+def bound_names(node: ast.AST) -> set[str]:
+    if isinstance(node, ast.Name):
+        return {node.id}
+    if isinstance(node, ast.List | ast.Tuple):
+        return {name for element in node.elts for name in bound_names(element)}
+    return set()
 
 
 class Facts:
     def __init__(self, tree: ast.Module, file_path: str):
-        self.values: dict[str, set[str]] = defaultdict(set)
+        self.values: dict[ast.AST, dict[str, set[str]]] = defaultdict(
+            lambda: defaultdict(set)
+        )
+        self.bindings: dict[ast.AST, set[str]] = defaultdict(set)
+        self.node_scopes: dict[ast.AST, ast.AST] = {}
+        self.scope_parents: dict[ast.AST, ast.AST | None] = {tree: None}
         self.module_name, self.package_name = module_identity(file_path)
+        self._index_scopes(tree)
+        self._collect_bindings(tree)
         self._collect_imports(tree)
         self._resolve_assignments(tree)
 
-    def add(self, key: str, values: Iterable[str]) -> bool:
-        before = len(self.values[key])
-        self.values[key].update(values)
-        return len(self.values[key]) != before
+    def _index_scopes(self, tree: ast.Module) -> None:
+        scope_types = ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda | ast.ClassDef
+
+        def visit(node: ast.AST, scope: ast.AST) -> None:
+            self.node_scopes[node] = scope
+            for child in ast.iter_child_nodes(node):
+                if isinstance(child, scope_types):
+                    self.node_scopes[child] = scope
+                    parent_scope = (
+                        self.scope_parents[scope] if isinstance(scope, ast.ClassDef) else scope
+                    )
+                    self.scope_parents[child] = parent_scope
+                    for descendant in ast.iter_child_nodes(child):
+                        visit(descendant, child)
+                else:
+                    visit(child, scope)
+
+        visit(tree, tree)
+
+    def _scope_for(self, node: ast.AST) -> ast.AST:
+        return self.node_scopes[node]
+
+    def _collect_bindings(self, tree: ast.Module) -> None:
+        for node in ast.walk(tree):
+            scope = self._scope_for(node)
+            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+                self.bindings[scope].add(node.name)
+            if isinstance(node, ast.arg):
+                self.bindings[scope].add(node.arg)
+            elif isinstance(node, ast.Assign):
+                for target in node.targets:
+                    self.bindings[scope].update(bound_names(target))
+            elif isinstance(node, ast.AnnAssign | ast.NamedExpr):
+                self.bindings[scope].update(bound_names(node.target))
+            elif isinstance(node, ast.For | ast.AsyncFor):
+                self.bindings[scope].update(bound_names(node.target))
+            elif isinstance(node, ast.comprehension):
+                self.bindings[scope].update(bound_names(node.target))
+            elif isinstance(node, ast.With | ast.AsyncWith):
+                for item in node.items:
+                    if item.optional_vars is not None:
+                        self.bindings[scope].update(bound_names(item.optional_vars))
+            elif isinstance(node, ast.ExceptHandler) and node.name:
+                self.bindings[scope].add(node.name)
+            elif isinstance(node, ast.Import):
+                for alias in node.names:
+                    self.bindings[scope].add(alias.asname or alias.name.split(".", 1)[0])
+            elif isinstance(node, ast.ImportFrom):
+                for alias in node.names:
+                    if alias.name != "*":
+                        self.bindings[scope].add(alias.asname or alias.name)
+
+    def add(self, scope: ast.AST, key: str, values: Iterable[str]) -> bool:
+        before = len(self.values[scope][key])
+        self.values[scope][key].update(values)
+        return len(self.values[scope][key]) != before
+
+    def _lookup(self, node: ast.AST, key: str) -> set[str]:
+        scope: ast.AST | None = self._scope_for(node)
+        root = key.split(".", 1)[0].split("[", 1)[0]
+        while scope is not None:
+            if key in self.values[scope]:
+                return set(self.values[scope][key])
+            if root in self.bindings[scope]:
+                return set()
+            scope = self.scope_parents[scope]
+        return set()
 
     def _collect_imports(self, tree: ast.Module) -> None:
         for node in ast.walk(tree):
+            scope = self._scope_for(node)
             if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
                 full_name = f"{self.module_name}.{node.name}"
-                if full_name in KNOWN_HELPERS:
-                    self.add(node.name, {f"helper:{KNOWN_HELPERS[full_name]}"})
+                if scope is tree and full_name in KNOWN_HELPERS:
+                    self.add(scope, node.name, {f"helper:{KNOWN_HELPERS[full_name]}"})
             elif isinstance(node, ast.Import):
                 for alias in node.names:
                     bound = alias.asname or alias.name.split(".", 1)[0]
                     if alias.name in {"logging", "pprint", "sys", "traceback", "warnings"}:
-                        self.add(bound, {f"module:{alias.name}"})
+                        self.add(scope, bound, {f"module:{alias.name}"})
                     elif alias.name == POLICY_MODULE:
-                        self.add(alias.asname or alias.name, {f"module:{POLICY_MODULE}"})
+                        self.add(
+                            scope,
+                            alias.asname or alias.name,
+                            {f"module:{POLICY_MODULE}"},
+                        )
             elif isinstance(node, ast.ImportFrom):
                 module = resolve_import(node.module, node.level, self.package_name)
                 for alias in node.names:
@@ -202,17 +286,20 @@ class Facts:
                     if full_name == POLICY_MODULE:
                         facts.add(f"module:{POLICY_MODULE}")
                     if module == POLICY_MODULE and alias.name in POLICY_NAMES:
-                        facts.add(f"policy:{POLICY_NAMES[alias.name]}")
+                        policy = POLICY_NAMES[alias.name]
+                        facts.update({f"policy:{policy}", f"policy-exact:{policy}"})
                     if full_name in KNOWN_HELPERS:
                         facts.add(f"helper:{KNOWN_HELPERS[full_name]}")
                     if module in RAW_MODULE_METHODS and alias.name in RAW_MODULE_METHODS[module]:
                         facts.add(f"method:raw:{module}.{alias.name}")
+                    if module == "sys" and alias.name in {"stdout", "stderr"}:
+                        facts.add(f"stream:{alias.name}")
                     if facts:
-                        self.add(bound, facts)
+                        self.add(scope, bound, facts)
 
     def infer(self, node: ast.AST) -> set[str]:
         key = expression_key(node)
-        result = set(self.values.get(key or "", ()))
+        result = self._lookup(node, key) if key else set()
         if isinstance(node, ast.Name):
             if node.id == "print":
                 result.add("method:raw:print")
@@ -228,7 +315,8 @@ class Facts:
                 elif fact == "logger" and node.attr in LOG_METHODS:
                     result.add(f"method:logger:{node.attr}")
                 elif fact == f"module:{POLICY_MODULE}" and node.attr in POLICY_NAMES:
-                    result.add(f"policy:{POLICY_NAMES[node.attr]}")
+                    policy = POLICY_NAMES[node.attr]
+                    result.update({f"policy:{policy}", f"policy-exact:{policy}"})
                 elif fact.startswith("module:"):
                     module = fact.split(":", 1)[1]
                     if module in RAW_MODULE_METHODS and node.attr in RAW_MODULE_METHODS[module]:
@@ -250,11 +338,21 @@ class Facts:
         if isinstance(node, ast.BoolOp):
             for value in node.values:
                 result.update(self.infer(value))
+            result = {fact for fact in result if not fact.startswith("policy-exact:")}
             return result
         if isinstance(node, ast.IfExp):
             result.update(self.infer(node.body))
             result.update(self.infer(node.orelse))
+            result = {fact for fact in result if not fact.startswith("policy-exact:")}
             return result
+        if isinstance(node, ast.UnaryOp):
+            result.update(self.infer(node.operand))
+            return {fact for fact in result if not fact.startswith("policy-exact:")}
+        if isinstance(node, ast.Compare):
+            result.update(self.infer(node.left))
+            for comparator in node.comparators:
+                result.update(self.infer(comparator))
+            return {fact for fact in result if not fact.startswith("policy-exact:")}
         if isinstance(node, ast.Tuple | ast.List | ast.Set):
             for element in node.elts:
                 result.update(self.infer(element))
@@ -271,19 +369,21 @@ class Facts:
         changed = True
         while changed:
             changed = False
-            for keys, value in assignments:
+            for assignment, keys, value in assignments:
                 inferred = self.infer(value)
+                scope = self._scope_for(assignment)
                 for key in keys:
-                    changed |= self.add(key, inferred)
+                    changed |= self.add(scope, key, inferred)
 
     def _seed_special_attributes(self, tree: ast.Module) -> None:
         for node in ast.walk(tree):
             if not isinstance(node, ast.Import):
                 continue
+            scope = self._scope_for(node)
             for alias in node.names:
                 if alias.name == "functools":
                     bound = alias.asname or "functools"
-                    self.add(f"{bound}.partial", {"factory:partial"})
+                    self.add(scope, f"{bound}.partial", {"factory:partial"})
 
 
 def make_parent_map(tree: ast.AST) -> dict[ast.AST, ast.AST]:
@@ -316,7 +416,7 @@ def branch_for_child(parent: ast.AST, child: ast.AST) -> tuple[ast.AST, bool] | 
 
 
 def possible_boolean_results(node: ast.AST, facts: Facts, policy: str, value: bool) -> set[bool]:
-    if f"policy:{policy}" in facts.infer(node):
+    if f"policy-exact:{policy}" in facts.infer(node):
         key = expression_key(node)
         if key or isinstance(node, ast.Name):
             return {value}
@@ -493,18 +593,25 @@ def enclosing_catch_names(node: ast.AST, parents: Mapping[ast.AST, ast.AST]) -> 
 
 
 def call_shape(call: ast.Call, method: str) -> str:
-    exc_info = next((keyword.value for keyword in call.keywords if keyword.arg == "exc_info"), None)
+    keywords = {keyword.arg: keyword.value for keyword in call.keywords if keyword.arg is not None}
+    exc_info = keywords.get("exc_info")
     has_exc_info = exc_info is not None and not (
         isinstance(exc_info, ast.Constant) and exc_info.value in (None, False)
     )
     if method == "exception" or has_exc_info:
         return "exception-payload"
-    if len(call.args) > 1 or any(keyword.arg == "extra" for keyword in call.keywords):
+    if len(call.args) > 1 or "extra" in keywords:
         return "payload"
-    if not call.args:
+    if method in SENSITIVE_HELPER_METHODS and any(
+        name not in {"logger", "target_logger", "message", "msg"} for name in keywords
+    ):
+        return "payload"
+    message = call.args[0] if call.args else keywords.get("msg", keywords.get("message"))
+    if message is None:
+        if call.keywords:
+            return "dynamic-message"
         return "static-message"
-    first = call.args[0]
-    if isinstance(first, ast.Constant) and isinstance(first.value, str):
+    if isinstance(message, ast.Constant) and isinstance(message.value, str):
         return "static-message"
     return "dynamic-message"
 

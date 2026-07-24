@@ -34,6 +34,27 @@ logger.exception("Unhandled failure")
             ],
         )
 
+    def test_inventories_keyword_messages_and_helper_payloads(self) -> None:
+        findings = inventory_source(
+            """
+from agents.logger import logger, log_tool_action_error
+
+logger.error(msg=secret)
+logger.info(msg="ready")
+log_tool_action_error(target_logger=logger, message=secret, exc=error)
+"""
+        )
+
+        self.assertEqual(
+            [(item.kind, item.shape) for item in findings],
+            [
+                ("logger", "dynamic-message"),
+                ("logger", "static-message"),
+                ("sensitive-helper", "payload"),
+            ],
+        )
+        self.assertEqual(summarize(findings)["dynamic"], 2)
+
     def test_recognizes_logger_factories_aliases_methods_and_partial(self) -> None:
         findings = inventory_source(
             """
@@ -98,6 +119,24 @@ task.exception()
             ],
         )
 
+    def test_inventories_directly_imported_output_streams(self) -> None:
+        findings = inventory_source(
+            """
+from sys import stderr, stdout as out
+
+stderr.write(secret)
+out.write(secret)
+"""
+        )
+
+        self.assertEqual(
+            [(item.kind, item.method, item.shape) for item in findings],
+            [
+                ("raw-output", "stderr.write", "dynamic-message"),
+                ("raw-output", "stdout.write", "dynamic-message"),
+            ],
+        )
+
     def test_requires_exact_policy_provenance_and_correct_polarity(self) -> None:
         findings = inventory_source(
             """
@@ -114,6 +153,44 @@ if not request.DONT_LOG_TOOL_DATA:
         )
 
         self.assertEqual([item.policy for item in findings], ["tool-guard", "none", "none"])
+
+    def test_scopes_policy_facts_to_lexical_bindings(self) -> None:
+        findings = inventory_source(
+            """
+from agents import _debug
+from agents.logger import logger
+
+def configure():
+    flag = _debug.DONT_LOG_TOOL_DATA
+    return flag
+
+def report(flag, secret):
+    if not flag:
+        logger.error("unguarded: %s", secret)
+"""
+        )
+
+        self.assertEqual(findings[0].policy, "none")
+
+    def test_preserves_direct_policy_aliases_but_not_composite_boolean_aliases(self) -> None:
+        findings = inventory_source(
+            """
+from agents import _debug
+from agents.logger import logger
+
+def direct(secret):
+    flag = _debug.DONT_LOG_TOOL_DATA
+    if not flag:
+        logger.error("guarded: %s", secret)
+
+def composite(enabled, secret):
+    guard = _debug.DONT_LOG_TOOL_DATA and enabled
+    if not guard:
+        logger.error("unguarded: %s", secret)
+"""
+        )
+
+        self.assertEqual([item.policy for item in findings], ["tool-guard", "none"])
 
     def test_combines_exact_model_and_tool_guards(self) -> None:
         findings = inventory_source(
