@@ -705,7 +705,15 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
                 if should_include:
                     filtered_tools.append(tool)
             except Exception as e:
-                log_tool_action_error(logger, "Error applying MCP tool filter", e)
+                if _debug.DONT_LOG_TOOL_DATA:
+                    message = "Error applying MCP tool filter"
+                else:
+                    server_name = get_mcp_server_log_name(self.name)
+                    message = (
+                        f"Error applying MCP tool filter to tool '{tool.name}' "
+                        f"on server '{server_name}'"
+                    )
+                log_tool_action_error(logger, message, e)
                 # On error, exclude the tool for safety
                 continue
 

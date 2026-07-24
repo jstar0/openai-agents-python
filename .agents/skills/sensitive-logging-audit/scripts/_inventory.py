@@ -15,6 +15,7 @@ LOG_METHODS = {
     "debug",
     "error",
     "exception",
+    "fatal",
     "info",
     "log",
     "warn",
@@ -397,8 +398,11 @@ class Facts:
                         result.add(f"method:raw:{module}.{node.attr}")
                     if module == "sys" and node.attr in {"stdout", "stderr"}:
                         result.add(f"stream:{node.attr}")
-                elif fact.startswith("stream:") and node.attr == "write":
-                    result.add(f"method:raw:{fact.split(':', 1)[1]}.write")
+                elif fact.startswith("stream:"):
+                    if node.attr == "buffer":
+                        result.add(fact)
+                    elif node.attr == "write":
+                        result.add(f"method:raw:{fact.split(':', 1)[1]}.write")
             return result
         if isinstance(node, ast.Call):
             callee_facts = self.infer(node.func)

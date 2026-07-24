@@ -17,7 +17,7 @@ from typing_extensions import NotRequired, TypedDict
 
 from agents import _debug
 from agents.exceptions import ModelBehaviorError, UserError
-from agents.logger import log_tool_action_error, logger
+from agents.logger import log_model_and_tool_action_error, log_tool_action_error, logger
 from agents.models import _openai_shared
 from agents.run_context import RunContextWrapper
 from agents.strict_schema import ensure_strict_json_schema
@@ -1052,7 +1052,7 @@ async def _consume_events(
                 if inspect.isawaitable(maybe_result):
                     await maybe_result
             except Exception as exc:
-                log_tool_action_error(
+                log_model_and_tool_action_error(
                     logger,
                     "Error while handling Codex on_stream event",
                     exc,

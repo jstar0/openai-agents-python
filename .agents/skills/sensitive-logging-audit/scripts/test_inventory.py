@@ -140,6 +140,48 @@ out.write(secret)
             ],
         )
 
+    def test_inventories_buffered_output_streams(self) -> None:
+        findings = inventory_source(
+            """
+import sys
+from sys import stdout as out
+
+sys.stderr.buffer.write(secret_bytes)
+writer = out.buffer
+writer.write(secret_bytes)
+"""
+        )
+
+        self.assertEqual(
+            [(item.kind, item.method, item.shape) for item in findings],
+            [
+                ("raw-output", "stderr.write", "dynamic-message"),
+                ("raw-output", "stdout.write", "dynamic-message"),
+            ],
+        )
+
+    def test_inventories_fatal_logger_aliases(self) -> None:
+        findings = inventory_source(
+            """
+import logging
+from agents.logger import logger
+from logging import fatal as die
+
+logger.fatal(secret)
+logging.fatal(secret)
+die(secret)
+"""
+        )
+
+        self.assertEqual(
+            [(item.kind, item.method, item.shape) for item in findings],
+            [
+                ("logger", "fatal", "dynamic-message"),
+                ("logger", "fatal", "dynamic-message"),
+                ("logger", "fatal", "dynamic-message"),
+            ],
+        )
+
     def test_requires_exact_policy_provenance_and_correct_polarity(self) -> None:
         findings = inventory_source(
             """
