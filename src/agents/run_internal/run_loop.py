@@ -1231,6 +1231,8 @@ async def start_streaming(
                         store_setting,
                     )
 
+                    await streamed_result._wait_for_turn_event_consumption()
+
                     if streamed_result._cancel_mode == "after_turn":  # type: ignore[comparison-overlap]
                         streamed_result.is_complete = True
                         streamed_result._event_queue.put_nowait(QueueCompleteSentinel())

@@ -403,13 +403,8 @@ class RealtimeSession(RealtimeModelListener):
                 )
             )
         elif event.type == "transcript_delta":
-            # Accumulate transcript text for guardrail debouncing per item_id
             item_id = event.item_id
-            if item_id not in self._item_transcripts:
-                self._item_transcripts[item_id] = ""
-                self._item_guardrail_run_counts[item_id] = 0
-
-            self._item_transcripts[item_id] += event.delta
+            self._record_output_guardrail_delta(item_id, event.delta, event.response_id)
             self._history = self._get_new_history(
                 self._history,
                 AssistantMessageItem(
@@ -417,16 +412,6 @@ class RealtimeSession(RealtimeModelListener):
                     content=[AssistantAudio(transcript=self._item_transcripts[item_id])],
                 ),
             )
-
-            # Check if we should run guardrails based on debounce threshold
-            current_length = len(self._item_transcripts[item_id])
-            threshold = self._debounce_text_length
-            next_run_threshold = (self._item_guardrail_run_counts[item_id] + 1) * threshold
-
-            if current_length >= next_run_threshold:
-                self._item_guardrail_run_counts[item_id] += 1
-                # Pass response_id so we can ensure only a single interrupt per response
-                self._enqueue_guardrail_task(self._item_transcripts[item_id], event.response_id)
         elif event.type == "item_updated":
             is_new = not any(item.item_id == event.item.item_id for item in self._history)
 
@@ -525,7 +510,23 @@ class RealtimeSession(RealtimeModelListener):
         elif event.type == "other":
             pass
         elif event.type == "raw_server_event":
-            pass
+            raw_event = event.data
+            if (
+                isinstance(raw_event, dict)
+                and raw_event.get("type") == "response.output_text.delta"
+            ):
+                raw_item_id = raw_event.get("item_id")
+                raw_delta = raw_event.get("delta")
+                raw_response_id = raw_event.get("response_id")
+                if (
+                    isinstance(raw_item_id, str)
+                    and isinstance(raw_delta, str)
+                    and isinstance(raw_response_id, str)
+                    and raw_item_id
+                    and raw_delta
+                    and raw_response_id
+                ):
+                    self._record_output_guardrail_delta(raw_item_id, raw_delta, raw_response_id)
         else:
             assert_never(event)
 
@@ -1357,6 +1358,21 @@ class RealtimeSession(RealtimeModelListener):
             return True
 
         return False
+
+    def _record_output_guardrail_delta(self, item_id: str, delta: str, response_id: str) -> None:
+        """Accumulate text or audio transcript deltas using the same guardrail debounce."""
+        if item_id not in self._item_transcripts:
+            self._item_transcripts[item_id] = ""
+            self._item_guardrail_run_counts[item_id] = 0
+
+        self._item_transcripts[item_id] += delta
+        current_length = len(self._item_transcripts[item_id])
+        next_run_threshold = (
+            self._item_guardrail_run_counts[item_id] + 1
+        ) * self._debounce_text_length
+        if current_length >= next_run_threshold:
+            self._item_guardrail_run_counts[item_id] += 1
+            self._enqueue_guardrail_task(self._item_transcripts[item_id], response_id)
 
     def _enqueue_guardrail_task(self, text: str, response_id: str) -> None:
         # Runs the guardrails in a separate task to avoid blocking the main loop

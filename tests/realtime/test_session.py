@@ -48,6 +48,7 @@ from agents.realtime.model_events import (
     RealtimeModelItemDeletedEvent,
     RealtimeModelItemUpdatedEvent,
     RealtimeModelOtherEvent,
+    RealtimeModelRawServerEvent,
     RealtimeModelToolCallEvent,
     RealtimeModelTranscriptDeltaEvent,
     RealtimeModelTurnEndedEvent,
@@ -3532,6 +3533,95 @@ class TestGuardrailFunctionality:
         guardrail_events = [e for e in events if isinstance(e, RealtimeGuardrailTripped)]
         assert len(guardrail_events) == 1
         assert guardrail_events[0].message == "this is more than ten characters"
+
+    @pytest.mark.asyncio
+    async def test_text_output_deltas_trigger_guardrails_at_threshold(
+        self, mock_model, mock_agent, triggered_guardrail
+    ):
+        session = RealtimeSession(
+            mock_model,
+            mock_agent,
+            None,
+            run_config={
+                "output_guardrails": [triggered_guardrail],
+                "guardrails_settings": {"debounce_text_length": 10},
+            },
+        )
+
+        await session.on_event(
+            RealtimeModelRawServerEvent(
+                data={
+                    "type": "response.output_text.delta",
+                    "item_id": "item_text",
+                    "response_id": "resp_text",
+                    "delta": "blocked ",
+                }
+            )
+        )
+        assert mock_model.interrupts_called == 0
+
+        await session.on_event(
+            RealtimeModelRawServerEvent(
+                data={
+                    "type": "response.output_text.delta",
+                    "item_id": "item_text",
+                    "response_id": "resp_text",
+                    "delta": "content",
+                }
+            )
+        )
+        await self._wait_for_guardrail_tasks(session)
+
+        assert mock_model.interrupts_called == 1
+        assert mock_model.sent_messages == ["guardrail triggered: triggered_guardrail"]
+        assert session._item_transcripts["item_text"] == "blocked content"
+        events = []
+        while not session._event_queue.empty():
+            events.append(await session._event_queue.get())
+        guardrail_events = [
+            event for event in events if isinstance(event, RealtimeGuardrailTripped)
+        ]
+        assert len(guardrail_events) == 1
+        assert guardrail_events[0].message == "blocked content"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "invalid_event",
+        [
+            {"type": "response.output_text.delta", "delta": "blocked"},
+            {
+                "type": "response.output_text.delta",
+                "item_id": "item_text",
+                "response_id": "resp_text",
+                "delta": "",
+            },
+            {
+                "type": "response.output_audio_transcript.delta",
+                "item_id": "item_text",
+                "response_id": "resp_text",
+                "delta": "blocked",
+            },
+        ],
+        ids=["missing-identifiers", "empty-delta", "audio-transcript-handled-separately"],
+    )
+    async def test_unrelated_raw_server_events_do_not_schedule_text_guardrails(
+        self, mock_model, mock_agent, triggered_guardrail, invalid_event
+    ):
+        session = RealtimeSession(
+            mock_model,
+            mock_agent,
+            None,
+            run_config={
+                "output_guardrails": [triggered_guardrail],
+                "guardrails_settings": {"debounce_text_length": 1},
+            },
+        )
+
+        await session.on_event(RealtimeModelRawServerEvent(data=invalid_event))
+        await self._wait_for_guardrail_tasks(session)
+
+        assert mock_model.interrupts_called == 0
+        assert session._item_transcripts == {}
 
     @pytest.mark.asyncio
     async def test_agent_and_run_config_guardrails_not_run_twice(self, mock_model):
