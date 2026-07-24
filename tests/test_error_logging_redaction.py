@@ -246,7 +246,10 @@ def test_shared_error_helper_drops_exception_chains_and_notes(monkeypatch) -> No
     cause = ValueError(f"{_SECRET} cause")
     error = RuntimeError(f"{_SECRET} outer")
     error.__cause__ = cause
-    error.add_note(f"{_SECRET} note")
+    if hasattr(error, "add_note"):
+        error.add_note(f"{_SECRET} note")
+    else:
+        error.__notes__ = [f"{_SECRET} note"]
 
     log_model_action_error(test_logger, "Model failed", error)
 
