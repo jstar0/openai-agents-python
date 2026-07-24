@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from _inventory import (
+    collect_source_files,
     compare_findings,
     inventory_source,
     summarize,
@@ -191,6 +194,29 @@ def composite(enabled, secret):
         )
 
         self.assertEqual([item.policy for item in findings], ["tool-guard", "none"])
+
+    def test_policy_assignments_do_not_flow_backward_or_through_conditional_rebinding(
+        self,
+    ) -> None:
+        findings = inventory_source(
+            """
+from agents import _debug
+from agents.logger import logger
+
+def assigned_later(flag, secret):
+    if not flag:
+        logger.error("unguarded before assignment: %s", secret)
+    flag = _debug.DONT_LOG_TOOL_DATA
+
+def conditionally_reassigned(flag, condition, secret):
+    if condition:
+        flag = _debug.DONT_LOG_TOOL_DATA
+    if not flag:
+        logger.error("unguarded after conditional assignment: %s", secret)
+"""
+        )
+
+        self.assertEqual([item.policy for item in findings], ["none", "none"])
 
     def test_combines_exact_model_and_tool_guards(self) -> None:
         findings = inventory_source(
@@ -394,6 +420,33 @@ def report(secret):
         self.assertEqual([item.group_count for item in findings], [2, 2])
         self.assertEqual([item.identity_quality for item in findings], ["duplicate", "duplicate"])
         self.assertEqual([item.fingerprint.rsplit(":", 1)[-1] for item in findings], ["0", "1"])
+
+    def test_discovers_keyword_callback_sinks(self) -> None:
+        findings = inventory_source(
+            """
+import sys
+from agents.logger import logger
+
+register(on_error=logger.error, writer=sys.stderr.write)
+"""
+        )
+
+        self.assertEqual(
+            [(item.kind, item.method) for item in findings],
+            [("logger-callback", "error"), ("raw-output-callback", "stderr.write")],
+        )
+
+    def test_source_collection_ignores_hidden_paths_only_below_the_scan_root(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / ".cache" / "worktree"
+            visible = root / "src" / "visible.py"
+            hidden = root / ".generated" / "hidden.py"
+            visible.parent.mkdir(parents=True)
+            hidden.parent.mkdir()
+            visible.touch()
+            hidden.touch()
+
+            self.assertEqual(collect_source_files([root]), [visible.resolve()])
 
     def test_normalizes_path_separators_before_hashing(self) -> None:
         source = "from agents.logger import logger\nlogger.error('failed', secret)\n"

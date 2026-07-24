@@ -26,10 +26,21 @@ def get_mcp_server_log_name(name: str) -> str:
             return f"{prefix}<invalid-url>"
         return name
 
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+    if parsed.scheme not in {"http", "https"}:
         return name
 
-    host = parsed.netloc.rsplit("@", 1)[-1]
+    try:
+        hostname = parsed.hostname
+        port = parsed.port
+    except ValueError:
+        return f"{prefix}<invalid-url>"
+
+    if not parsed.netloc or not hostname or any(character.isspace() for character in hostname):
+        return f"{prefix}<invalid-url>"
+
+    host = f"[{hostname}]" if ":" in hostname else hostname
+    if port is not None:
+        host = f"{host}:{port}"
     sanitized = urlunsplit((parsed.scheme, host, parsed.path, "", ""))
     return f"{prefix}{sanitized}"
 

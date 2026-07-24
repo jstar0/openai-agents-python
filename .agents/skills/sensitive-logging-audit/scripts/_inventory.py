@@ -93,7 +93,8 @@ def collect_source_files(roots: Sequence[str | Path]) -> list[Path]:
         if not root.is_dir():
             raise FileNotFoundError(f"Inventory root does not exist: {root_value}")
         for path in root.rglob("*.py"):
-            if any(part.startswith(".") or part == "__pycache__" for part in path.parts):
+            relative_parts = path.relative_to(root).parts
+            if any(part.startswith(".") or part == "__pycache__" for part in relative_parts):
                 continue
             files.add(path.resolve())
     return sorted(files)
@@ -170,9 +171,20 @@ class Facts:
         self.bindings: dict[ast.AST, set[str]] = defaultdict(set)
         self.node_scopes: dict[ast.AST, ast.AST] = {}
         self.scope_parents: dict[ast.AST, ast.AST | None] = {tree: None}
+        self.parents = make_parent_map(tree)
+        self.assignments = list(iter_assignments(tree))
+        self.assignment_values: dict[ast.AST, dict[str, list[tuple[ast.AST, ast.AST]]]] = (
+            defaultdict(lambda: defaultdict(list))
+        )
+        self.import_policy_values: dict[ast.AST, dict[str, set[str]]] = defaultdict(dict)
+        self._policy_lookup_stack: set[tuple[int, str]] = set()
         self.module_name, self.package_name = module_identity(file_path)
         self._index_scopes(tree)
         self._collect_bindings(tree)
+        for assignment, keys, value in self.assignments:
+            scope = self._scope_for(assignment)
+            for key in keys:
+                self.assignment_values[scope][key].append((assignment, value))
         self._collect_imports(tree)
         self._resolve_assignments(tree)
 
@@ -238,11 +250,75 @@ class Facts:
         root = key.split(".", 1)[0].split("[", 1)[0]
         while scope is not None:
             if key in self.values[scope]:
-                return set(self.values[scope][key])
+                result = set(self.values[scope][key])
+                result = {fact for fact in result if not fact.startswith("policy")}
+                result.update(self._lookup_policy(node, key))
+                return result
+            if root in self.bindings[scope]:
+                return self._lookup_policy(node, key)
+            scope = self.scope_parents[scope]
+        return set()
+
+    def _lookup_policy(self, node: ast.AST, key: str) -> set[str]:
+        token = (id(node), key)
+        if token in self._policy_lookup_stack:
+            return set()
+
+        use_scope = self._scope_for(node)
+        scope: ast.AST | None = use_scope
+        root = key.split(".", 1)[0].split("[", 1)[0]
+        while scope is not None:
+            definitions = self.assignment_values[scope].get(key, [])
+            if definitions:
+                if scope is not use_scope:
+                    return set()
+                preceding = [
+                    definition
+                    for definition in definitions
+                    if self._node_position(definition[0]) < self._node_position(node)
+                ]
+                if not preceding:
+                    return set()
+                assignment, value = max(preceding, key=lambda item: self._node_position(item[0]))
+                if not self._definition_precedes_in_same_block(assignment, node):
+                    return set()
+                self._policy_lookup_stack.add(token)
+                try:
+                    return {
+                        fact
+                        for fact in self.infer(value)
+                        if fact.startswith(("policy:", "policy-exact:"))
+                    }
+                finally:
+                    self._policy_lookup_stack.remove(token)
+
+            imported = self.import_policy_values[scope].get(key)
+            if imported is not None:
+                return set(imported)
             if root in self.bindings[scope]:
                 return set()
             scope = self.scope_parents[scope]
         return set()
+
+    @staticmethod
+    def _node_position(node: ast.AST) -> tuple[int, int]:
+        return (getattr(node, "lineno", -1), getattr(node, "col_offset", -1))
+
+    def _definition_precedes_in_same_block(
+        self, definition: ast.AST, use: ast.AST
+    ) -> bool:
+        parent = self.parents.get(definition)
+        if parent is None:
+            return False
+        for _, value in ast.iter_fields(parent):
+            if not isinstance(value, list) or definition not in value:
+                continue
+            definition_index = value.index(definition)
+            child = use
+            while child in self.parents and self.parents[child] is not parent:
+                child = self.parents[child]
+            return child in value and definition_index < value.index(child)
+        return False
 
     def _collect_imports(self, tree: ast.Module) -> None:
         for node in ast.walk(tree):
@@ -285,7 +361,9 @@ class Facts:
                         facts.add(f"module:{POLICY_MODULE}")
                     if module == POLICY_MODULE and alias.name in POLICY_NAMES:
                         policy = POLICY_NAMES[alias.name]
-                        facts.update({f"policy:{policy}", f"policy-exact:{policy}"})
+                        policy_facts = {f"policy:{policy}", f"policy-exact:{policy}"}
+                        facts.update(policy_facts)
+                        self.import_policy_values[scope][bound] = policy_facts
                     if full_name in KNOWN_HELPERS:
                         facts.add(f"helper:{KNOWN_HELPERS[full_name]}")
                     if module in RAW_MODULE_METHODS and alias.name in RAW_MODULE_METHODS[module]:
@@ -363,11 +441,10 @@ class Facts:
 
     def _resolve_assignments(self, tree: ast.Module) -> None:
         self._seed_special_attributes(tree)
-        assignments = list(iter_assignments(tree))
         changed = True
         while changed:
             changed = False
-            for assignment, keys, value in assignments:
+            for assignment, keys, value in self.assignments:
                 inferred = self.infer(value)
                 scope = self._scope_for(assignment)
                 for key in keys:
@@ -767,7 +844,11 @@ def inventory_source(source: str, file_path: str = "fixture.py") -> list[Finding
             )
 
         if not _is_partial_call(callee_facts):
-            for argument in node.args:
+            callback_arguments = [
+                *node.args,
+                *(keyword.value for keyword in node.keywords if keyword.arg is not None),
+            ]
+            for argument in callback_arguments:
                 for fact in facts.infer(argument):
                     if not fact.startswith("method:"):
                         continue
