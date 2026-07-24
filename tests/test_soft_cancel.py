@@ -11,7 +11,12 @@ from agents import Agent, Runner, SQLiteSession
 from agents.stream_events import StreamEvent
 
 from .fake_model import FakeModel
-from .test_responses import get_function_tool, get_function_tool_call, get_text_message
+from .test_responses import (
+    get_function_tool,
+    get_function_tool_call,
+    get_handoff_tool_call,
+    get_text_message,
+)
 
 
 @pytest.mark.asyncio
@@ -523,6 +528,58 @@ async def test_soft_cancel_with_handoff():
 
     # Cleanup
     await session.clear_session()
+
+
+@pytest.mark.asyncio
+async def test_soft_cancel_waits_for_handoff_event_consumption_before_next_turn():
+    """A suspended handoff consumer can stop the run before the delegate model starts."""
+    second_request_started = asyncio.Event()
+
+    class HandoffModel(FakeModel):
+        def __init__(self) -> None:
+            super().__init__()
+            self.request_count = 0
+
+        async def stream_response(self, *args, **kwargs):
+            self.request_count += 1
+            if self.request_count == 2:
+                second_request_started.set()
+            async for event in super().stream_response(*args, **kwargs):
+                yield event
+
+    model = HandoffModel()
+    delegate = Agent(name="Delegate", model=model)
+    triage = Agent(name="Triage", model=model, handoffs=[delegate])
+    model.add_multiple_turn_outputs(
+        [
+            [get_handoff_tool_call(delegate)],
+            [get_text_message("Delegate response")],
+        ]
+    )
+
+    result = Runner.run_streamed(triage, input="Route this request")
+    consumer_suspended = asyncio.Event()
+    release_consumer = asyncio.Event()
+
+    async def consume_events() -> None:
+        async for event in result.stream_events():
+            if event.type == "run_item_stream_event" and event.name == "handoff_requested":
+                consumer_suspended.set()
+                await release_consumer.wait()
+                result.cancel(mode="after_turn")
+
+    consumer_task = asyncio.create_task(consume_events())
+    await asyncio.wait_for(consumer_suspended.wait(), timeout=1)
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    assert not second_request_started.is_set()
+
+    release_consumer.set()
+    await asyncio.wait_for(consumer_task, timeout=1)
+
+    assert result.final_output is None
+    assert result.context_wrapper.usage.requests == 1
 
 
 @pytest.mark.asyncio
