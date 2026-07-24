@@ -34,6 +34,7 @@ from urllib.parse import urlsplit
 
 from pydantic import BaseModel, Field
 
+from ....logger import log_tool_action_warning
 from ....sandbox.entries import Mount
 from ....sandbox.errors import (
     ExecNonZeroError,
@@ -865,33 +866,24 @@ class E2BSandboxSession(BaseSandboxSession):
                 await _sandbox_kill(self._sandbox)
         except Exception as e:
             if self.state.pause_on_exit:
-                logger.warning(
+                log_tool_action_warning(
+                    logger,
                     "Failed to pause E2B sandbox on shutdown; falling back to kill.",
-                    extra={
-                        "sandbox_id": self.state.sandbox_id,
-                        "pause_on_exit": self.state.pause_on_exit,
-                    },
-                    exc_info=e,
+                    e,
                 )
                 try:
                     await _sandbox_kill(self._sandbox)
                 except Exception as kill_exc:
-                    logger.warning(
+                    log_tool_action_warning(
+                        logger,
                         "Failed to kill E2B sandbox after pause fallback failure.",
-                        extra={
-                            "sandbox_id": self.state.sandbox_id,
-                            "pause_on_exit": self.state.pause_on_exit,
-                        },
-                        exc_info=kill_exc,
+                        kill_exc,
                     )
             else:
-                logger.warning(
+                log_tool_action_warning(
+                    logger,
                     "Failed to kill E2B sandbox on shutdown.",
-                    extra={
-                        "sandbox_id": self.state.sandbox_id,
-                        "pause_on_exit": self.state.pause_on_exit,
-                    },
-                    exc_info=e,
+                    e,
                 )
 
     async def _exec_internal(

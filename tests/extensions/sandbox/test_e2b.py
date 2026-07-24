@@ -2189,11 +2189,15 @@ async def test_e2b_stop_terminates_live_pty_sessions() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("redacted", [True, False])
 async def test_e2b_shutdown_logs_pause_failure_and_falls_back_to_kill(
+    monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
+    redacted: bool,
 ) -> None:
+    monkeypatch.setattr("agents._debug.DONT_LOG_TOOL_DATA", redacted)
     sandbox = _FakeE2BSandbox()
-    sandbox.pause_error = RuntimeError("pause failed")
+    sandbox.pause_error = RuntimeError("SECRET_E2B_PAUSE_FAILURE")
     state = E2BSandboxSessionState(
         session_id=uuid.uuid4(),
         manifest=Manifest(root="/workspace"),
@@ -2211,6 +2215,7 @@ async def test_e2b_shutdown_logs_pause_failure_and_falls_back_to_kill(
     assert sandbox.pause_calls == 1
     assert sandbox.kill_calls == 1
     assert "Failed to pause E2B sandbox on shutdown; falling back to kill." in caplog.text
+    assert ("SECRET_E2B_PAUSE_FAILURE" not in caplog.text) is redacted
 
 
 @pytest.mark.asyncio
