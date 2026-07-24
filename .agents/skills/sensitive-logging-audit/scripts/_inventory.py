@@ -166,9 +166,7 @@ def bound_names(node: ast.AST) -> set[str]:
 
 class Facts:
     def __init__(self, tree: ast.Module, file_path: str):
-        self.values: dict[ast.AST, dict[str, set[str]]] = defaultdict(
-            lambda: defaultdict(set)
-        )
+        self.values: dict[ast.AST, dict[str, set[str]]] = defaultdict(lambda: defaultdict(set))
         self.bindings: dict[ast.AST, set[str]] = defaultdict(set)
         self.node_scopes: dict[ast.AST, ast.AST] = {}
         self.scope_parents: dict[ast.AST, ast.AST | None] = {tree: None}
