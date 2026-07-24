@@ -304,9 +304,7 @@ class Facts:
     def _node_position(node: ast.AST) -> tuple[int, int]:
         return (getattr(node, "lineno", -1), getattr(node, "col_offset", -1))
 
-    def _definition_precedes_in_same_block(
-        self, definition: ast.AST, use: ast.AST
-    ) -> bool:
+    def _definition_precedes_in_same_block(self, definition: ast.AST, use: ast.AST) -> bool:
         parent = self.parents.get(definition)
         if parent is None:
             return False

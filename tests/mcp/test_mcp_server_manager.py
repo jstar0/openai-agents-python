@@ -203,6 +203,11 @@ class CleanupAwareServer(MCPServer):
             "streamable_http: https://example.test/mcp",
         ),
         (
+            "streamable_http: https://user:password@example.test:8443/mcp?token=secret",
+            "streamable_http: https://example.test:8443/mcp",
+        ),
+        ("streamable_http: https://[::1]:8000/mcp", "streamable_http: https://[::1]:8000/mcp"),
+        (
             "streamable-http: https://example.test/mcp#secret",
             "streamable-http: https://example.test/mcp",
         ),
